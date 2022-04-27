@@ -22,7 +22,11 @@ import (
 	istioOperatorApi "github.com/Tomasz-Smelcerz-SAP/kyma-operator-istio/k8s-api/api/v1alpha1"
 	inventoryv1alpha1 "github.com/Tomasz-Smelcerz-SAP/kyma-operator-mothership/operator/api/v1alpha1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -30,8 +34,9 @@ import (
 
 // KymaReconciler reconciles a Kyma object
 type KymaReconciler struct {
-	client.Client
-	Scheme *runtime.Scheme
+	Client        client.Client
+	DynamicClient dynamic.Interface
+	Scheme        *runtime.Scheme
 }
 
 //+kubebuilder:rbac:groups=inventory.kyma-project.io,resources=kymas,verbs=get;list;watch;create;update;patch;delete
@@ -80,6 +85,38 @@ func (r *KymaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	//Create CR instances for component operators
+
+	//1) Create CR for Istio component operator
+	/*
+		istioObjKey, err := r.CreateIstioCR(ctx, &obj)
+		if err != nil {
+			logger.Error(err, "Error creating IstioConfiguration")
+			return ctrl.Result{}, err
+		}
+		logger.Info("Successfully created IstioConfiguration:", "object:", istioObjKey)
+	*/
+
+	//2) Create CR for Serverless component operator
+	serverlessObjKey, err := r.CreateServerlessCR(ctx, &obj)
+	if err != nil {
+		logger.Error(err, "Error creating ServerlessConfiguration")
+		return ctrl.Result{}, err
+	}
+	logger.Info("Successfully created ServerlessConfiguration:", "object:", serverlessObjKey)
+
+	logger.Info("Successfully reconciled Kyma:", "object:", obj)
+	return ctrl.Result{}, nil
+}
+
+// SetupWithManager sets up the controller with the Manager.
+func (r *KymaReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&inventoryv1alpha1.Kyma{}).
+		Complete(r)
+}
+
+func (r *KymaReconciler) CreateIstioCR(ctx context.Context, obj *inventoryv1alpha1.Kyma) (client.ObjectKey, error) {
 	importantValue := obj.Spec.Foo
 
 	istioObject := istioOperatorApi.IstioConfiguration{}
@@ -89,21 +126,43 @@ func (r *KymaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	istioObject.Spec = istioOperatorApi.IstioConfigurationSpec{}
 	istioObject.Spec.Foo = importantValue + "_from_mothership"
 
-	err = r.Client.Create(ctx, &istioObject)
-	if err != nil {
-		logger.Error(err, "Error creating IstioConfiguration")
-		return ctrl.Result{}, err
-	}
-	logger.Info("Successfully created IstioConfiguration:", "object:", istioObject)
-
-	logger.Info("Successfully reconciled Kyma:", "object:", obj)
-
-	return ctrl.Result{}, nil
+	err := r.Client.Create(ctx, &istioObject)
+	return client.ObjectKey{Name: istioObject.Name, Namespace: istioObject.Namespace}, err
 }
 
-// SetupWithManager sets up the controller with the Manager.
-func (r *KymaReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&inventoryv1alpha1.Kyma{}).
-		Complete(r)
+func (r *KymaReconciler) CreateServerlessCR(ctx context.Context, obj *inventoryv1alpha1.Kyma) (client.ObjectKey, error) {
+	serverlessConfigurationResource := schema.GroupVersionResource{Group: "kyma.kyma-project.io", Version: "v1alpha1", Resource: "serverlessconfigurations"}
+	serverlessClient := r.DynamicClient.Resource(serverlessConfigurationResource).Namespace(obj.ObjectMeta.Namespace)
+
+	commonPrefix := obj.Spec.Foo
+	githubRepositoryAuthKey := "a1b2c3d4e5"
+	githubRepositoryUrl := "https://kyma-project.io/serverless/dummy"
+
+	target := unstructured.Unstructured{
+		Object: map[string]interface{}{
+			//"apiVersion": "v1alpha1",
+			//"kind":       "ServerlessConfiguration",
+			"spec": map[string]interface{}{
+				"commonPrefix": commonPrefix,
+				"githubRepository": map[string]interface{}{
+					"authKey": githubRepositoryAuthKey,
+					"url":     githubRepositoryUrl,
+				},
+			},
+		},
+	}
+
+	groupVersionKind := schema.GroupVersionKind{
+		Group:   "kyma.kyma-project.io",
+		Version: "v1alpha1",
+		Kind:    "ServerlessConfiguration",
+	}
+
+	target.SetGroupVersionKind(groupVersionKind)
+	target.SetName(obj.GetName() + "-serverless")
+	target.SetNamespace(obj.GetNamespace())
+
+	_, err := serverlessClient.Create(ctx, &target, metav1.CreateOptions{})
+
+	return client.ObjectKey{Name: target.GetName(), Namespace: target.GetNamespace()}, err
 }
