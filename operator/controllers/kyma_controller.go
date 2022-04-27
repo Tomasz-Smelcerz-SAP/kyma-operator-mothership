@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 
 	istioOperatorApi "github.com/Tomasz-Smelcerz-SAP/kyma-operator-istio/k8s-api/api/v1alpha1"
 	inventoryv1alpha1 "github.com/Tomasz-Smelcerz-SAP/kyma-operator-mothership/operator/api/v1alpha1"
@@ -59,7 +60,7 @@ func (r *KymaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	err := r.Client.Get(ctx, req.NamespacedName, &obj)
 	if apierrors.IsNotFound(err) {
 		//object is deleted
-		logger.Info("Object is deleted:", "object", req.NamespacedName)
+		logger.Info("Object is deleted:", "object", req.NamespacedName.String())
 
 		//try to delete related IstioConfiguration object
 		istioObject := istioOperatorApi.IstioConfiguration{}
@@ -67,15 +68,26 @@ func (r *KymaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		istioObject.Namespace = req.Namespace
 
 		err = r.Client.Delete(ctx, &istioObject)
-		if apierrors.IsNotFound(err) {
-			//IstioConfiguration does not exist. Success.
-			return ctrl.Result{}, nil
+		if !apierrors.IsNotFound(err) {
+			if err != nil {
+				logger.Error(err, "Error during IstioConfiguration delete")
+				return ctrl.Result{}, err
+			}
+			logger.Info("Successfully deleted IstioConfiguration:", "object:", client.ObjectKey{Name: istioObject.ObjectMeta.Name, Namespace: istioObject.ObjectMeta.Namespace}.String())
 		}
-		if err != nil {
-			logger.Error(err, "Error during IstioConfiguration delete")
-			return ctrl.Result{}, err
+
+		//try to delete related ServerlessConfiguration object
+		serverlessObjectKey, err := r.DeleteServerlessCR(ctx, req.NamespacedName)
+		if !apierrors.IsNotFound(err) {
+			if err != nil {
+				logger.Error(err, "Error during ServerlessConfiguration delete")
+				return ctrl.Result{}, err
+			}
+			logger.Info("Successfully deleted ServerlessConfiguration:", "object:", serverlessObjectKey.String())
+			fmt.Println("========================================")
+			fmt.Println(serverlessObjectKey.String())
+			fmt.Println("========================================")
 		}
-		logger.Info("Successfully deleted IstioConfiguration:", "object:", istioObject)
 
 		return ctrl.Result{}, nil
 	}
@@ -88,14 +100,12 @@ func (r *KymaReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	//Create CR instances for component operators
 
 	//1) Create CR for Istio component operator
-	/*
-		istioObjKey, err := r.CreateIstioCR(ctx, &obj)
-		if err != nil {
-			logger.Error(err, "Error creating IstioConfiguration")
-			return ctrl.Result{}, err
-		}
-		logger.Info("Successfully created IstioConfiguration:", "object:", istioObjKey)
-	*/
+	istioObjKey, err := r.CreateIstioCR(ctx, &obj)
+	if err != nil {
+		logger.Error(err, "Error creating IstioConfiguration")
+		return ctrl.Result{}, err
+	}
+	logger.Info("Successfully created IstioConfiguration:", "object:", istioObjKey)
 
 	//2) Create CR for Serverless component operator
 	serverlessObjKey, err := r.CreateServerlessCR(ctx, &obj)
@@ -165,4 +175,21 @@ func (r *KymaReconciler) CreateServerlessCR(ctx context.Context, obj *inventoryv
 	_, err := serverlessClient.Create(ctx, &target, metav1.CreateOptions{})
 
 	return client.ObjectKey{Name: target.GetName(), Namespace: target.GetNamespace()}, err
+}
+
+func (r *KymaReconciler) DeleteServerlessCR(ctx context.Context, kymaObjectKey client.ObjectKey) (client.ObjectKey, error) {
+	serverlessConfigurationResource := schema.GroupVersionResource{Group: "kyma.kyma-project.io", Version: "v1alpha1", Resource: "serverlessconfigurations"}
+	serverlessClient := r.DynamicClient.Resource(serverlessConfigurationResource).Namespace(kymaObjectKey.Namespace)
+
+	deleteOptions := metav1.DeleteOptions{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "ServerlessConfiguration",
+			APIVersion: "v1alpha1",
+		},
+	}
+
+	name := kymaObjectKey.Name + "-serverless"
+
+	err := serverlessClient.Delete(ctx, name, deleteOptions)
+	return client.ObjectKey{Name: name, Namespace: kymaObjectKey.Namespace}, err
 }
